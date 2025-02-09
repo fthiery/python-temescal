@@ -20,14 +20,14 @@ from setuptools import setup, find_packages
 
 dynamic_requires = []
 
-version = "0.3"
+version = "0.6"
 
 setup(
     name='temescal',
-    version="0.3",
-    author='Matthew Garrett',
-    author_email='mjg59@google.com',
-    url='http://github.com/google/python-temescal',
+    version=version,
+    author='Matthew Garrett, Florent Thiéry',
+    author_email='mjg59@google.com, fthiery@gmail.com',
+    url='http://github.com/fthiery/python-temescal',
     packages=find_packages(),
     scripts=[],
     description='Python API for controlling LG speakers',
