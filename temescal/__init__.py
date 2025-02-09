@@ -19,10 +19,29 @@ import struct
 from Crypto.Cipher import AES
 from threading import Thread
 
-equalisers = ["Standard", "Bass", "Flat", "Boost", "Treble and Bass", "User",
-              "Music", "Cinema", "Night", "News", "Voice", "ia_sound",
-              "Adaptive Sound Control", "Movie", "Bass Blast", "Dolby Atmos",
-              "DTS Virtual X", "Bass Boost Plus", "DTS X"]
+import time
+
+equalisers = [
+    "Standard",
+    "Bass",
+    "Flat",
+    "Boost",
+    "Treble and Bass",
+    "User",
+    "Music",
+    "Cinema",
+    "Night",
+    "News",
+    "Voice",
+    "ia_sound",
+    "Adaptive Sound Control",
+    "Movie",
+    "Bass Blast",
+    "Dolby Atmos",
+    "DTS Virtual X",
+    "Bass Boost Plus",
+    "DTS X",
+]
 
 STANDARD = 0
 BASS = 1
@@ -44,9 +63,28 @@ DTS_VIRTUAL_X = 16
 BASS_BOOST_PLUS = 17
 DTS_X = 18
 
-functions = ["Wifi", "Bluetooth", "Portable", "Aux", "Optical", "CP", "HDMI",
-             "ARC", "Spotify", "Optical2", "HDMI2", "HDMI3", "LG TV", "Mic",
-             "Chromecast", "Optical/HDMI ARC", "LG Optical", "FM", "USB", "USB2"]
+functions = [
+    "Wifi",
+    "Bluetooth",
+    "Portable",
+    "Aux",
+    "Optical",
+    "CP",
+    "HDMI",
+    "ARC",
+    "Spotify",
+    "Optical2",
+    "HDMI2",
+    "HDMI3",
+    "LG TV",
+    "Mic",
+    "Chromecast",
+    "Optical/HDMI ARC",
+    "LG Optical",
+    "FM",
+    "USB",
+    "USB2",
+]
 
 WIFI = 0
 BLUETOOTH = 1
@@ -69,32 +107,71 @@ FM = 17
 USB = 18
 USB_2 = 19
 
+CONSIDER_TIMEOUT = 30
+HEARTBEAT_INTERVAL = CONSIDER_TIMEOUT - 3
+
+
 class temescal:
     def __init__(self, address, port=9741, callback=None, logger=None):
-        self.iv = b'\'%^Ur7gy$~t+f)%@'
-        self.key = b'T^&*J%^7tr~4^%^&I(o%^!jIJ__+a0 k'
+        self.iv = b"'%^Ur7gy$~t+f)%@"
+        self.key = b"T^&*J%^7tr~4^%^&I(o%^!jIJ__+a0 k"
         self.address = address
         self.port = port
         self.callback = callback
+        self.offline_notified = False
         self.logger = logger
         self.socket = None
+        self.last_callback_time = None
+        self.connected = False
         self.connect()
         if callback is not None:
             self.thread = Thread(target=self.listen, daemon=True)
             self.thread.start()
 
+    def log(self, msg):
+        if self.logger is not None:
+            self.logger(msg)
+
     def connect(self):
+        self.log(f"Connecting to tcp://{self.address}:{self.port}")
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.settimeout(1)
         self.socket.connect((self.address, self.port))
 
     def listen(self):
         while True:
+            now = time.time()
+
+            if self.last_callback_time is not None:
+                elapsed_since_last_callback = now - self.last_callback_time
+
+                if elapsed_since_last_callback > HEARTBEAT_INTERVAL:
+                    self.log("Sending heartbeat command")
+                    self.get_product_info()
+
+                    # avoid spamming heartbeats when disconnected
+                    if not self.connected:
+                        self.last_callback_time = now
+
+                if elapsed_since_last_callback > CONSIDER_TIMEOUT:
+                    self.connected = False
+                    if not self.offline_notified:
+                        self.log(f"{self.address} disconnected")
+                        response = {"msg": "DISCONNECTED"}
+                        self.callback(response)
+                        self.offline_notified = True
+                        continue
+
             try:
                 data = self.socket.recv(1)
-            except Exception:
+            except TimeoutError:
+                pass
+            except Exception as e:
+                self.log(f"Got error while waiting for data, reconnecting: {e}")
                 self.connect()
 
-            if len(data) == 0: # the soundbar closed the connection, recreate it
+            if len(data) == 0:
+                self.log("The soundbar closed the connection, reconnecting")
                 self.socket.shutdown(socket.SHUT_RDWR)
                 self.socket.close()
                 self.connect()
@@ -109,12 +186,18 @@ class temescal:
                 response = self.decrypt_packet(data)
                 if response is not None:
                     self.callback(json.loads(response))
+                    if not self.connected:
+                        self.log("Soundbar is back !")
+                    self.log(f"Got message: {response}")
+                    self.connected = True
+                    self.offline_notified = False
+                    self.last_callback_time = now
 
     def encrypt_packet(self, data):
         padlen = 16 - (len(data) % 16)
         for i in range(padlen):
             data = data + chr(padlen)
-        data = data.encode('utf-8')
+        data = data.encode("utf-8")
         cipher = AES.new(self.key, AES.MODE_CBC, self.iv)
 
         encrypted = cipher.encrypt(data)
@@ -126,18 +209,20 @@ class temescal:
         cipher = AES.new(self.key, AES.MODE_CBC, self.iv)
         decrypt = cipher.decrypt(data)
         padding = decrypt[-1:]
-        decrypt = decrypt[:-ord(padding)]
-        return str(decrypt, 'utf-8')
+        decrypt = decrypt[: -ord(padding)]
+        return str(decrypt, "utf-8")
 
     def send_packet(self, data):
         packet = self.encrypt_packet(json.dumps(data))
         try:
             self.socket.send(packet)
-        except Exception:
+        except Exception as e:
+            self.log(f"Sending packet failed with: {e}, reconnect and retry")
             try:
                 self.connect()
                 self.socket.send(packet)
-            except Exception:
+            except Exception as e:
+                self.log(f"Sending packet failed again with {e}, giving up")
                 pass
 
     def get_eq(self):
@@ -145,7 +230,7 @@ class temescal:
         self.send_packet(data)
 
     def set_eq(self, eq):
-        data = {"cmd": "set", "data": {"i_curr_eq": eq }, "msg": "EQ_VIEW_INFO"}
+        data = {"cmd": "set", "data": {"i_curr_eq": eq}, "msg": "EQ_VIEW_INFO"}
         self.send_packet(data)
 
     def get_info(self):
@@ -209,11 +294,19 @@ class temescal:
         self.send_packet(data)
 
     def set_night_mode(self, enable):
-        data = {"cmd": "set", "data": {"b_night_mode": enable}, "msg": "SETTING_VIEW_INFO"}
+        data = {
+            "cmd": "set",
+            "data": {"b_night_mode": enable},
+            "msg": "SETTING_VIEW_INFO",
+        }
         self.send_packet(data)
 
     def set_avc(self, enable):
-        data = {"cmd": "set", "data": {"b_auto_vol": enable}, "msg": "SETTING_VIEW_INFO"}
+        data = {
+            "cmd": "set",
+            "data": {"b_auto_vol": enable},
+            "msg": "SETTING_VIEW_INFO",
+        }
         self.send_packet(data)
 
     def set_drc(self, enable):
@@ -229,7 +322,11 @@ class temescal:
         self.send_packet(data)
 
     def set_woofer_level(self, value):
-        data = {"cmd": "set", "data": {"i_woofer_level": value}, "msg": "SETTING_VIEW_INFO"}
+        data = {
+            "cmd": "set",
+            "data": {"i_woofer_level": value},
+            "msg": "SETTING_VIEW_INFO",
+        }
         self.send_packet(data)
 
     def set_rear_control(self, enable):
@@ -237,39 +334,75 @@ class temescal:
         self.send_packet(data)
 
     def set_rear_level(self, value):
-        data = {"cmd": "set", "data": {"i_rear_level": value}, "msg": "SETTING_VIEW_INFO"}
+        data = {
+            "cmd": "set",
+            "data": {"i_rear_level": value},
+            "msg": "SETTING_VIEW_INFO",
+        }
         self.send_packet(data)
 
     def set_top_level(self, value):
-        data = {"cmd": "set", "data": {"i_top_level": value}, "msg": "SETTING_VIEW_INFO"}
+        data = {
+            "cmd": "set",
+            "data": {"i_top_level": value},
+            "msg": "SETTING_VIEW_INFO",
+        }
         self.send_packet(data)
 
     def set_center_level(self, value):
-        data = {"cmd": "set", "data": {"i_center_level": value}, "msg": "SETTING_VIEW_INFO"}
+        data = {
+            "cmd": "set",
+            "data": {"i_center_level": value},
+            "msg": "SETTING_VIEW_INFO",
+        }
         self.send_packet(data)
 
     def set_tv_remote(self, enable):
-        data = {"cmd": "set", "data": {"b_tv_remote": enable}, "msg": "SETTING_VIEW_INFO"}
+        data = {
+            "cmd": "set",
+            "data": {"b_tv_remote": enable},
+            "msg": "SETTING_VIEW_INFO",
+        }
         self.send_packet(data)
 
     def set_auto_power(self, enable):
-        data = {"cmd": "set", "data": {"b_auto_power": enable}, "msg": "SETTING_VIEW_INFO"}
+        data = {
+            "cmd": "set",
+            "data": {"b_auto_power": enable},
+            "msg": "SETTING_VIEW_INFO",
+        }
         self.send_packet(data)
 
     def set_auto_display(self, enable):
-        data = {"cmd": "set", "data": {"b_auto_display": enable}, "msg": "SETTING_VIEW_INFO"}
+        data = {
+            "cmd": "set",
+            "data": {"b_auto_display": enable},
+            "msg": "SETTING_VIEW_INFO",
+        }
         self.send_packet(data)
 
     def set_bt_standby(self, enable):
-        data = {"cmd": "set", "data": {"b_bt_standby": enable}, "msg": "SETTING_VIEW_INFO"}
+        data = {
+            "cmd": "set",
+            "data": {"b_bt_standby": enable},
+            "msg": "SETTING_VIEW_INFO",
+        }
         self.send_packet(data)
 
     def set_bt_restrict(self, enable):
-        data = {"cmd": "set", "data": {"b_conn_bt_limit": enable}, "msg": "SETTING_VIEW_INFO"}
+        data = {
+            "cmd": "set",
+            "data": {"b_conn_bt_limit": enable},
+            "msg": "SETTING_VIEW_INFO",
+        }
         self.send_packet(data)
 
     def set_sleep_time(self, value):
-        data = {"cmd": "set", "data": {"i_sleep_time": value}, "msg": "SETTING_VIEW_INFO"}
+        data = {
+            "cmd": "set",
+            "data": {"i_sleep_time": value},
+            "msg": "SETTING_VIEW_INFO",
+        }
         self.send_packet(data)
 
     def set_func(self, value):
